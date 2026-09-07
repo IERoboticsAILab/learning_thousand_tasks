@@ -1,0 +1,4 @@
+The demo store is runtime data: demos are recorded on the robot, uploaded to the
+MT3 server over MQTT, and moved between machines by rsync -- never by git. The
+directory itself is kept because server/docker-compose.yml bind-mounts it, and a
+missing bind source is created by Docker as root, which then breaks writes.

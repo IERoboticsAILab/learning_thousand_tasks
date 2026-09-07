@@ -11,7 +11,8 @@ __pycache__/
 XMem/
 
 # Example data (demonstrations and test data)
-assets/demonstrations/
+assets/demonstrations/*
+!assets/demonstrations/.gitkeep
 assets/inference_example/
 assets/demonstrations.zip
 assets/inference_example.zip
