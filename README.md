@@ -123,7 +123,9 @@ After completing the setup, you will have the following data to run MT3 immediat
 - `pose_estimator.ckpt` - Pre-trained 4-DOF pose regressor
 
 **Camera Extrinsics** (`assets/` - included in repository):
-- `T_WC_head.npy` - Head camera extrinsics (world-to-camera transform) from our experiments
+- `T_WC_head.npy` - Head camera extrinsics: the camera-to-world (base) transform,
+  i.e. `p_base = T_WC @ p_cam`. Produced by `calibration_script.py` +
+  `install_calibration.py`; the inverse maps base -> camera for projection.
 
 ---
 
@@ -157,8 +159,8 @@ The script runs through 7 steps:
 - Registration result showing aligned point clouds after refinement
 
 **Saved visualizations** in `assets/example_visualisations/`:
-- `test_scene_visualization.png` - RGB, depth, and segmentation of test scene
-- `retrieval_visualization.png` - Live scene vs retrieved demo (2×2 grid)
+- `test_scene_visualization.jpg` - RGB, depth, and segmentation of test scene
+- `retrieval_visualization.jpg` - Live scene vs retrieved demo (2×2 grid)
 
 **Console output** showing:
 - Retrieved demonstration name

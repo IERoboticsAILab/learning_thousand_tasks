@@ -8,6 +8,7 @@ from thousand_tasks.core.base_classes.rgbd_pose_estimation_refinement import Rgb
 from thousand_tasks.core.utils.scene_state import SceneState
 from thousand_tasks.core.utils.se3_tools import pose_inv
 from thousand_tasks.core.utils.se3_tools import rot2euler, euler2rot
+from thousand_tasks.core.utils.camera_frames import relative_camera_transform, transform_points
 from thousand_tasks.core.utils.visualisation import draw_registration_result
 
 
@@ -49,14 +50,12 @@ class Open3dIcpPoseRefinement(RgbdPoseEstimationRefinementBase):
         assert len(pcd2_o3d.points) > 10, f'PCD 2 has {len(pcd2_o3d.points)} points which is <= 10'
 
         if different_cameras_live_demo:
-            print("Using different extrinsics for demo and live")
-            T_WC1 = scene1_state.T_WC
-            T_WC2 = scene2_state.T_WC
-            T_C2C1 = pose_inv(T_WC2) @ T_WC1
-            pcd1_h = np.asarray(pcd1_o3d.points)
-            pcd1_h = np.concatenate((pcd1_h, np.ones((pcd1_h.shape[0], 1))), axis=1)
-            pcd1_h = pcd1_h @ T_C2C1.T
-            pcd1_o3d.points = o3d.utility.Vector3dVector(pcd1_h[:, :-1])
+            # Move the demo cloud into the live camera frame so both clouds are
+            # expressed in the same frame before registering. A no-op when the
+            # two cameras share a pose.
+            T_C2C1 = relative_camera_transform(scene1_state.T_WC, scene2_state.T_WC)
+            pcd1_o3d.points = o3d.utility.Vector3dVector(
+                transform_points(np.asarray(pcd1_o3d.points), T_C2C1))
 
         if self.icp_pose_estimator.error_metric == 'point-to-plane':
             pcd1_o3d.estimate_normals()

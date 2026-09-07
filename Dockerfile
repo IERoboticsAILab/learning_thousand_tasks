@@ -95,7 +95,7 @@ RUN pip install --no-cache-dir wandb==0.15.8
 RUN pip install --no-cache-dir git+https://github.com/openai/CLIP.git@a9b1bf5920416aaeaec965c25dd9e8f98c864f16
 
 # Install lightning (the unified package) while explicitly keeping your torch version
-RUN pip install --no-cache-dir lightning==2.0.6 --no-deps && \
+RUN pip install --no-cache-dir lightning==2.1.4 --no-deps && \
     pip install --no-cache-dir lightning-utilities torchmetrics fsspec packaging typing-extensions \
     arrow beautifulsoup4 click croniter dateutils deepdiff fastapi inquirer Jinja2 lightning-cloud \
     psutil pydantic rich starlette starsessions uvicorn websocket-client websockets requests urllib3 traitlets
