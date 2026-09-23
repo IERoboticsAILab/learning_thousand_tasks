@@ -107,11 +107,21 @@ def visualize_retrieval(test_rgb, test_segmap, demo_rgb, demo_segmap, save_path)
 DEMO_COLOUR = (1.0, 0.706, 0.0)     # orange
 LIVE_COLOUR = (0.0, 0.651, 0.929)   # blue
 
-# (elev, azim) pairs for the two panels of every point-cloud figure. Clouds are
-# in the OpenCV camera frame (x right, y down, z forward), so the first looks
-# along +z the way the camera does and the second is an oblique view that
-# exposes depth errors the camera view hides.
-PCD_VIEWS = (('Camera view', (-90, -90)), ('Oblique view', (-35, -60)))
+# Each point-cloud figure draws every panel from two viewpoints. A view is a
+# rotation applied to the (camera-frame) points before plotting their x/y in a
+# plain 2D scatter -- not an mplot3d axes, whose toolkit in the thousand-tasks
+# image is out of step with its matplotlib core (cbook._broadcast_with_masks is
+# missing) and raises on the first scatter. Clouds are in the OpenCV camera
+# frame (x right, y down, z forward), so the identity view is what the camera
+# sees, and the oblique one tilts the cloud to expose depth errors it hides.
+def _rotation(axis, degrees):
+    c, s = np.cos(np.radians(degrees)), np.sin(np.radians(degrees))
+    return {'x': np.array([[1, 0, 0], [0, c, -s], [0, s, c]]),
+            'y': np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])}[axis]
+
+
+PCD_VIEWS = (('Camera view', np.eye(3)),
+             ('Oblique view', _rotation('x', -55) @ _rotation('y', 30)))
 PCD_MAX_POINTS = 4000
 
 
@@ -139,40 +149,42 @@ def save_point_cloud_figure(panels, save_path, suptitle=None):
     `panels` is a list of (title, clouds) where clouds is a list of
     (points Nx3, colours, label). `colours` is either an Nx3 array of per-point
     RGB in [0, 1], a single RGB tuple, or None (grey). Each panel is drawn from
-    every view in PCD_VIEWS, all panels share one axis box so the same cloud
-    lands at the same place in every subplot.
+    every view in PCD_VIEWS; within a view all panels share one axis box so the
+    same cloud lands at the same place in every subplot.
     """
-    all_points = np.concatenate(
-        [pts for _, clouds in panels for pts, _, _ in clouds if len(pts)], axis=0)
-    centre = (all_points.min(axis=0) + all_points.max(axis=0)) / 2
-    half = max((all_points.max(axis=0) - all_points.min(axis=0)).max() / 2, 1e-3)
-
     n_rows, n_cols = len(panels), len(PCD_VIEWS)
-    fig = plt.figure(figsize=(6 * n_cols, 5.5 * n_rows))
-    for row, (title, clouds) in enumerate(panels):
-        for col, (view_name, (elev, azim)) in enumerate(PCD_VIEWS):
-            ax = fig.add_subplot(n_rows, n_cols, row * n_cols + col + 1, projection='3d')
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 6 * n_rows),
+                             squeeze=False)
+    for col, (view_name, R) in enumerate(PCD_VIEWS):
+        projected = [[(np.asarray(pts) @ R.T, colours, label) for pts, colours, label in clouds]
+                     for _, clouds in panels]
+        all_xy = np.concatenate(
+            [pts[:, :2] for clouds in projected for pts, _, _ in clouds if len(pts)], axis=0)
+        centre = (all_xy.min(axis=0) + all_xy.max(axis=0)) / 2
+        half = max((all_xy.max(axis=0) - all_xy.min(axis=0)).max() / 2, 1e-3) * 1.05
+
+        for row, ((title, _), clouds) in enumerate(zip(panels, projected)):
+            ax = axes[row, col]
             for points, colours, label in clouds:
                 if colours is None:
                     colours = (0.5, 0.5, 0.5)
                 if isinstance(colours, np.ndarray) and colours.ndim == 2:
-                    ax.scatter(points[:, 0], points[:, 1], points[:, 2],
-                               c=np.clip(colours, 0, 1), s=1, label=label)
+                    ax.scatter(points[:, 0], points[:, 1], c=np.clip(colours, 0, 1),
+                               s=1, alpha=0.6, label=label)
                 else:
-                    ax.scatter(points[:, 0], points[:, 1], points[:, 2],
-                               color=colours, s=1, label=label)
+                    # Translucent, so a demo cloud sitting under the live one
+                    # after a good registration still shows through.
+                    ax.scatter(points[:, 0], points[:, 1], color=colours, s=1, alpha=0.6,
+                               label=label)
             ax.set_xlim(centre[0] - half, centre[0] + half)
-            ax.set_ylim(centre[1] - half, centre[1] + half)
-            ax.set_zlim(centre[2] - half, centre[2] + half)
-            ax.set_box_aspect((1, 1, 1))
-            ax.view_init(elev=elev, azim=azim)
-            ax.set_xlabel('x [m]')
-            ax.set_ylabel('y [m]')
-            if abs(elev) == 90:
-                ax.set_zticks([])       # z is the viewing axis: its ticks collapse to a smear
-            else:
-                ax.set_zlabel('z [m]')
-            ax.set_title(f'{title} - {view_name}', pad=18)
+            # y is down in the camera frame: invert so the panel reads like the image.
+            ax.set_ylim(centre[1] + half, centre[1] - half)
+            ax.set_aspect('equal')
+            ax.grid(True, alpha=0.3)
+            is_camera = np.allclose(R, np.eye(3))
+            ax.set_xlabel('x [m]' if is_camera else 'projected x [m]')
+            ax.set_ylabel('y [m]' if is_camera else 'projected y [m]')
+            ax.set_title(f'{title} - {view_name}')
             if len(clouds) > 1:
                 ax.legend(loc='upper right', markerscale=8)
 
