@@ -152,15 +152,15 @@ The script runs through 7 steps:
 
 ### What You'll See
 
-**4 Open3D visualization windows** (close each to continue):
-- Live scene point cloud
-- Live scene vs retrieved demo comparison
-- Registration result showing aligned point clouds after PointNet++
-- Registration result showing aligned point clouds after refinement
-
-**Saved visualizations** in `assets/example_visualisations/`:
+**Saved visualizations** in `assets/example_visualisations/` (no windows are
+opened -- the script runs headless inside the MT3 container, which ships this
+whole directory back to the robot client):
 - `test_scene_visualization.jpg` - RGB, depth, and segmentation of test scene
 - `retrieval_visualization.jpg` - Live scene vs retrieved demo (2×2 grid)
+- `live_point_cloud.jpg` - Live object point cloud, camera and oblique views
+- `point_clouds_live_vs_demo.jpg` - Live vs retrieved demo clouds, unregistered
+- `registration_pointnet.jpg` - Demo (orange) over live (blue) before/after PointNet++
+- `registration_icp.jpg` - PointNet++ init vs after ICP (only when ICP is enabled)
 
 **Console output** showing:
 - Retrieved demonstration name

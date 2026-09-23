@@ -10,9 +10,11 @@ Demonstrates the complete MT3 pipeline:
 6. Transform demonstration bottleneck pose to live scene
 7. Access demonstration velocities for replay
 
-Note: Registration results will be visualized twice:
-- Once after PointNet++ initial estimate
-- Once after ICP refinement (close first window to continue)
+Every visualisation is written to the vis dir as a JPEG (the server ships the
+whole directory back to the client), never shown in a window: the pipeline runs
+headless inside a container, where an Open3D window would hang the run. The
+point-cloud views are rendered with matplotlib for the same reason -- Open3D's
+offscreen renderer needs an EGL/OSMesa build the image does not have.
 
 For actual robot deployment:
 - Replace test image loading with live camera capture
@@ -36,6 +38,7 @@ from pathlib import Path
 from thousand_tasks.core.globals import ASSETS_DIR
 from thousand_tasks.core.utils.scene_state import SceneState
 from thousand_tasks.core.utils.se3_tools import pose_inv, rot2euler, euler2rot
+from thousand_tasks.core.utils.camera_frames import relative_camera_transform, transform_points
 from thousand_tasks.retrieval.hierarchical_retrieval import HierarchicalRetrieval
 from thousand_tasks.retrieval.language_based_retrieval import LanguageBasedRetrieval
 from thousand_tasks.perception.pose_estimation.pnet_4dof_pose_regressor import PointnetPoseRegressor_4dof
@@ -100,21 +103,109 @@ def visualize_retrieval(test_rgb, test_segmap, demo_rgb, demo_segmap, save_path)
     plt.close()
 
 
-def visualize_point_clouds(live_pcd, demo_pcd):
-    """Visualize live and retrieved demonstration point clouds side by side."""
-    import open3d as o3d
+# Same colours draw_registration_result() uses in the interactive windows.
+DEMO_COLOUR = (1.0, 0.706, 0.0)     # orange
+LIVE_COLOUR = (0.0, 0.651, 0.929)   # blue
 
-    # Create coordinate frame
-    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+# (elev, azim) pairs for the two panels of every point-cloud figure. Clouds are
+# in the OpenCV camera frame (x right, y down, z forward), so the first looks
+# along +z the way the camera does and the second is an oblique view that
+# exposes depth errors the camera view hides.
+PCD_VIEWS = (('Camera view', (-90, -90)), ('Oblique view', (-35, -60)))
+PCD_MAX_POINTS = 4000
 
-    print("  Displaying point clouds (close window to continue)...")
-    o3d.visualization.draw_geometries(
-        [live_pcd, demo_pcd, coord_frame],
-        window_name="Object from Live Scene and Retrieved Demo",
-        width=800,
-        height=600,
-        point_show_normal=False
-    )
+
+def subsample_points(points, colours=None, max_points=PCD_MAX_POINTS):
+    """Cap a cloud at `max_points` for plotting. Seeded, so the same cloud
+    draws the same dots in every panel it appears in."""
+    points = np.asarray(points)
+    if len(points) > max_points:
+        keep = np.random.default_rng(0).choice(len(points), max_points, replace=False)
+        points = points[keep]
+        colours = colours[keep] if colours is not None else None
+    return points, colours
+
+
+def pcd_to_arrays(pcd, max_points=PCD_MAX_POINTS):
+    """(points, colours) from an Open3D cloud, subsampled for plotting.
+    Colours are None when the cloud has none."""
+    colours = np.asarray(pcd.colors) if pcd.has_colors() else None
+    return subsample_points(np.asarray(pcd.points), colours, max_points)
+
+
+def save_point_cloud_figure(panels, save_path, suptitle=None):
+    """Render point clouds to a JPEG, in place of an Open3D window.
+
+    `panels` is a list of (title, clouds) where clouds is a list of
+    (points Nx3, colours, label). `colours` is either an Nx3 array of per-point
+    RGB in [0, 1], a single RGB tuple, or None (grey). Each panel is drawn from
+    every view in PCD_VIEWS, all panels share one axis box so the same cloud
+    lands at the same place in every subplot.
+    """
+    all_points = np.concatenate(
+        [pts for _, clouds in panels for pts, _, _ in clouds if len(pts)], axis=0)
+    centre = (all_points.min(axis=0) + all_points.max(axis=0)) / 2
+    half = max((all_points.max(axis=0) - all_points.min(axis=0)).max() / 2, 1e-3)
+
+    n_rows, n_cols = len(panels), len(PCD_VIEWS)
+    fig = plt.figure(figsize=(6 * n_cols, 5.5 * n_rows))
+    for row, (title, clouds) in enumerate(panels):
+        for col, (view_name, (elev, azim)) in enumerate(PCD_VIEWS):
+            ax = fig.add_subplot(n_rows, n_cols, row * n_cols + col + 1, projection='3d')
+            for points, colours, label in clouds:
+                if colours is None:
+                    colours = (0.5, 0.5, 0.5)
+                if isinstance(colours, np.ndarray) and colours.ndim == 2:
+                    ax.scatter(points[:, 0], points[:, 1], points[:, 2],
+                               c=np.clip(colours, 0, 1), s=1, label=label)
+                else:
+                    ax.scatter(points[:, 0], points[:, 1], points[:, 2],
+                               color=colours, s=1, label=label)
+            ax.set_xlim(centre[0] - half, centre[0] + half)
+            ax.set_ylim(centre[1] - half, centre[1] + half)
+            ax.set_zlim(centre[2] - half, centre[2] + half)
+            ax.set_box_aspect((1, 1, 1))
+            ax.view_init(elev=elev, azim=azim)
+            ax.set_xlabel('x [m]')
+            ax.set_ylabel('y [m]')
+            if abs(elev) == 90:
+                ax.set_zticks([])       # z is the viewing axis: its ticks collapse to a smear
+            else:
+                ax.set_zlabel('z [m]')
+            ax.set_title(f'{title} - {view_name}', pad=18)
+            if len(clouds) > 1:
+                ax.legend(loc='upper right', markerscale=8)
+
+    if suptitle:
+        fig.suptitle(suptitle)
+    plt.tight_layout()
+    plt.savefig(str(save_path), **VIS_SAVE_KWARGS)
+    print(f"  Saved point cloud visualization to: {save_path}")
+    plt.close(fig)
+
+
+def demo_points_in_live_frame(demo_scene_state, T_WC_live):
+    """The demo object cloud re-expressed in the live camera frame.
+
+    This is the frame ICP registers in (see refine_relative_pose with
+    different_cameras_live_demo), so a camera-frame T_delta applies directly
+    to these points.
+    """
+    points = np.asarray(demo_scene_state.o3d_pcd.points)
+    T_C2C1 = relative_camera_transform(demo_scene_state.T_WC, T_WC_live)
+    return transform_points(points, T_C2C1)
+
+
+def save_registration_figure(demo_points_live_frame, live_points, stages, save_path, suptitle):
+    """One row per (stage name, camera-frame T_delta) showing demo (orange,
+    moved by T_delta) over live (blue) -- the headless draw_registration_result."""
+    panels = []
+    for stage_name, C_T_delta in stages:
+        moved = (demo_points_live_frame if C_T_delta is None
+                 else transform_points(demo_points_live_frame, C_T_delta))
+        panels.append((stage_name, [(moved, DEMO_COLOUR, 'Demo'),
+                                    (live_points, LIVE_COLOUR, 'Live')]))
+    save_point_cloud_figure(panels, save_path, suptitle)
 
 
 def apply_4dof_inductive_bias(W_T_delta_6dof: np.ndarray, T_WE: np.ndarray) -> np.ndarray:
@@ -426,23 +517,14 @@ def _run_pipeline(ctx, task_name, T_WC, icp_enabled=True):
     live_scene_state.crop_object_using_segmap()
     print(f"  Processed segmentation for: '{task_name}'")
 
-    # Visualize point cloud with Open3D
-    import open3d as o3d
-    pcd = live_scene_state.o3d_pcd
-    print(f"  Point cloud has {len(pcd.points)} points")
-
-    # Create coordinate frame for reference
-    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
-
-    # VISHERE
-    # print("  Displaying point cloud (close window to continue)...")
-    # o3d.visualization.draw_geometries(
-    #    [pcd, coord_frame],
-    #    window_name="Live Scene Point Cloud",
-    #    width=800,
-    #    height=600,
-    #    point_show_normal=False
-    # )
+    # Visualize the live object point cloud (RGB-coloured, camera frame)
+    live_pcd = live_scene_state.o3d_pcd     # a property: each access rebuilds the cloud
+    print(f"  Point cloud has {len(live_pcd.points)} points")
+    live_points, live_colours = pcd_to_arrays(live_pcd)
+    save_point_cloud_figure(
+        [('Live scene', [(live_points, live_colours, 'Live')])],
+        vis_dir / 'live_point_cloud.jpg',
+        suptitle='Live object point cloud (camera frame)')
 
     # -------------------------------------------------------------------------
     # Step 3: Retrieve similar demonstration
@@ -500,8 +582,20 @@ def _run_pipeline(ctx, task_name, T_WC, icp_enabled=True):
     retrieval_vis_path = vis_dir / 'retrieval_visualization.jpg'
     visualize_retrieval(test_rgb, live_scene_state.segmap, demo_rgb, demo_scene_state.segmap, retrieval_vis_path)
 
-    # VISHERE Visualize point clouds comparison
-    #visualize_point_clouds(live_scene_state.o3d_pcd, demo_scene_state.o3d_pcd)
+    # Visualize live vs retrieved demo point clouds, each in its own camera
+    # frame, before any registration.
+    demo_points_own_frame, demo_colours = pcd_to_arrays(demo_scene_state.o3d_pcd)
+    save_point_cloud_figure(
+        [('Live scene', [(live_points, live_colours, 'Live')]),
+         ('Retrieved demo', [(demo_points_own_frame, demo_colours, 'Demo')])],
+        vis_dir / 'point_clouds_live_vs_demo.jpg',
+        suptitle=f'Live object vs retrieved demo "{retrieved_demo_name}" (unregistered)')
+
+    # The registration figures below draw the demo cloud in the live camera
+    # frame -- the frame ICP registers in -- so a camera-frame T_delta moves it
+    # straight onto the live cloud.
+    demo_points_live_frame, _ = subsample_points(
+        demo_points_in_live_frame(demo_scene_state, T_WC))
 
     # =========================================================================
     # PART 1: ALIGNMENT - Estimate target pose for robot
@@ -517,11 +611,21 @@ def _run_pipeline(ctx, task_name, T_WC, icp_enabled=True):
     W_T_delta = pose_estimator.estimate_relative_pose(
         scene1_state=demo_scene_state,
         scene2_state=live_scene_state,
-        visualise_pcds=False, # VISHERE
+        visualise_pcds=False,   # would open a window; rendered to file below instead
         verbose=False
     )
 
     print(f"  PointNet++ prediction complete")
+
+    # Convert world-frame transformation to camera frame: ICP works in camera
+    # frame where point clouds are expressed, and so do the registration figures.
+    C_T_delta = pose_inv(T_WC) @ W_T_delta @ T_WC
+
+    save_registration_figure(
+        demo_points_live_frame, live_points,
+        [('Before registration', None), ('After PointNet++', C_T_delta)],
+        vis_dir / 'registration_pointnet.jpg',
+        suptitle='Registration: demo (orange) moved onto live (blue), PointNet++ estimate')
 
     # -------------------------------------------------------------------------
     # Step 5b: Refine pose estimate with Generalized ICP
@@ -540,10 +644,6 @@ def _run_pipeline(ctx, task_name, T_WC, icp_enabled=True):
         # for more robust alignment than standard point-to-point ICP
         pose_refiner = ctx.pose_refiner
 
-        # Convert world-frame transformation to camera frame for ICP
-        # ICP works in camera frame where point clouds are expressed
-        C_T_delta = pose_inv(T_WC) @ W_T_delta @ T_WC
-
         # Refine pose using Generalized ICP
         # This runs multiple ICP trials with small perturbations around the
         # PointNet++ prediction to find the best alignment
@@ -557,7 +657,7 @@ def _run_pipeline(ctx, task_name, T_WC, icp_enabled=True):
             T_delta_init=C_T_delta,
             T_WC_live=T_WC,
             verbose=False,
-            visualise_pcds=False, # VISHERE
+            visualise_pcds=False,   # would open a window; rendered to file below instead
             different_cameras_live_demo=True
         )
 
@@ -565,6 +665,12 @@ def _run_pipeline(ctx, task_name, T_WC, icp_enabled=True):
         W_T_delta_refined = T_WC @ C_T_delta_refined @ pose_inv(T_WC)
 
         print(f"  ICP refinement complete")
+
+        save_registration_figure(
+            demo_points_live_frame, live_points,
+            [('PointNet++ init', C_T_delta), ('After ICP', C_T_delta_refined)],
+            vis_dir / 'registration_icp.jpg',
+            suptitle='Registration: demo (orange) moved onto live (blue), ICP refinement')
 
     # -------------------------------------------------------------------------
     # Step 6: Apply 4DOF inductive bias
