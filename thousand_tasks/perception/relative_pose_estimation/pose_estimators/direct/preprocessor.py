@@ -76,8 +76,13 @@ class Preprocessor():
         std_scale = 4
         seg_flat_depth = depth.reshape(-1)[seg.reshape(-1)]
 
-        semi_sorted_args = np.argpartition(-seg_flat_depth[:], n_smallest)
-        largest_values = seg_flat_depth[semi_sorted_args[:n_smallest]]
+        if seg_flat_depth.size <= n_smallest:
+            # A mask this small has no "n_smallest largest" to partition out, and
+            # argpartition raises on it. Use every point for the statistics.
+            largest_values = seg_flat_depth
+        else:
+            semi_sorted_args = np.argpartition(-seg_flat_depth[:], n_smallest)
+            largest_values = seg_flat_depth[semi_sorted_args[:n_smallest]]
 
         mean, std = np.mean(largest_values), np.std(largest_values)
         filter_args = seg_flat_depth[:] > (mean + std_scale * std)
